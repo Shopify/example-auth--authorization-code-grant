@@ -42,6 +42,26 @@ function isValidShopDomain(shop) {
   return /^[a-zA-Z0-9][a-zA-Z0-9\-]*\.myshopify\.com$/.test(shop);
 }
 
+// Node's fetch has no timeout, so a stalled connection to Shopify would hang a
+// request until the client gives up. Give every call a deadline, and tag transport
+// failures so callers can tell "Shopify said no" from "we never reached Shopify".
+// fetch rejects only on a transport failure or this timeout: every HTTP status,
+// including 5xx, resolves and is the caller's to handle.
+const SHOPIFY_TIMEOUT_MS = 30_000;
+
+class ShopifyUnreachable extends Error {}
+
+async function shopifyFetch(url, options) {
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: AbortSignal.timeout(SHOPIFY_TIMEOUT_MS),
+    });
+  } catch (cause) {
+    throw new ShopifyUnreachable(`Could not reach ${new URL(url).hostname}`, { cause });
+  }
+}
+
 // [START oauth.build-authorization-url]
 app.get('/install', (req, res) => {
   const { shop } = req.query;
@@ -96,7 +116,7 @@ app.get('/callback', async (req, res) => {
   // [END oauth.validate-shop]
 
   // [START oauth.exchange-code]
-  const tokenResponse = await fetch(`https://${shop}/admin/oauth/access_token`, {
+  const tokenResponse = await shopifyFetch(`https://${shop}/admin/oauth/access_token`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/x-www-form-urlencoded',
@@ -154,19 +174,28 @@ async function refreshAccessToken(shop) {
   const stored = tokenStore[shop];
   if (!stored?.refresh_token) return 'reauthorize';
 
-  const response = await fetch(`https://${shop}/admin/oauth/access_token`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      Accept: 'application/json',
-    },
-    body: new URLSearchParams({
-      client_id: CLIENT_ID,
-      client_secret: CLIENT_SECRET,
-      grant_type: 'refresh_token',
-      refresh_token: stored.refresh_token,
-    }),
-  });
+  let response;
+  try {
+    response = await shopifyFetch(`https://${shop}/admin/oauth/access_token`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Accept: 'application/json',
+      },
+      body: new URLSearchParams({
+        client_id: CLIENT_ID,
+        client_secret: CLIENT_SECRET,
+        grant_type: 'refresh_token',
+        refresh_token: stored.refresh_token,
+      }),
+    });
+  } catch (error) {
+    // Only a transport failure or timeout becomes 'retry': the request never
+    // reached Shopify, so the refresh token is untouched and a later attempt is
+    // safe. Anything else is a bug in this code — let it surface.
+    if (!(error instanceof ShopifyUnreachable)) throw error;
+    return 'retry';
+  }
 
   if (response.status === 401) {
     delete tokenStore[shop];
@@ -205,7 +234,7 @@ app.get('/products', async (req, res) => {
     stored = tokenStore[shop];
   }
 
-  const response = await fetch(`https://${shop}/admin/api/2026-04/graphql.json`, {
+  const response = await shopifyFetch(`https://${shop}/admin/api/2026-04/graphql.json`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -217,5 +246,15 @@ app.get('/products', async (req, res) => {
   res.json(await response.json());
 });
 // [END oauth.make-request]
+
+// The routes above let a transport failure or timeout propagate. The request never
+// reached Shopify, so nothing was consumed and the caller can try again: 503 says
+// that, while the stack trace Express would otherwise return says the app is broken.
+app.use((err, req, res, next) => {
+  if (err instanceof ShopifyUnreachable) {
+    return res.status(503).send('Could not reach Shopify, try again');
+  }
+  next(err);
+});
 
 app.listen(3000, () => console.log('Server running on http://localhost:3000'));

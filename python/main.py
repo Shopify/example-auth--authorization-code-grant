@@ -247,6 +247,14 @@ def products():
 # [END oauth.make-request]
 
 
+# The routes above let a transport failure or timeout propagate. The request never
+# reached Shopify, so nothing was consumed and the caller can try again: 503 says
+# that, while the traceback Flask would otherwise return says the app is broken.
+@app.errorhandler(requests.RequestException)
+def handle_shopify_unreachable(_error):
+    return 'Could not reach Shopify, try again', 503
+
+
 if __name__ == '__main__':
     # Flask's development server. Use a production WSGI server (gunicorn, uWSGI)
     # when you deploy.
