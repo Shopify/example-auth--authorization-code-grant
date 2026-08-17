@@ -233,17 +233,46 @@ def products():
             return 'Token refresh failed, try again', 503
         stored = token_store[shop]
 
-    response = requests.post(
-        f'https://{shop}/admin/api/2026-04/graphql.json',
-        headers={
-            'Content-Type': 'application/json',
-            'X-Shopify-Access-Token': stored['access_token'],
-        },
-        json={'query': '{ products(first: 5) { edges { node { id handle } } } }'},
-        timeout=30,
-    )
+    def call_admin_api(access_token):
+        return requests.post(
+            f'https://{shop}/admin/api/2026-04/graphql.json',
+            headers={
+                'Content-Type': 'application/json',
+                'X-Shopify-Access-Token': access_token,
+            },
+            json={'query': '{ products(first: 5) { edges { node { id handle } } } }'},
+            timeout=30,
+        )
 
-    return jsonify(response.json())
+    response = call_admin_api(stored['access_token'])
+
+    # Shopify rejected the access token: it was revoked, the app's access scopes
+    # changed, or it lapsed sooner than expires_in implied. This app runs outside
+    # the Shopify admin, so it has no ID token to exchange — the refresh token is
+    # the only way back. Try it once, then give up rather than sending the same
+    # rejected token again on every later request.
+    if response.status_code == 401:
+        result = refresh_access_token(shop)
+        if result == 'retry':
+            # Transient: the refresh token is untouched, so a later attempt is fine.
+            return 'Token refresh failed, try again', 503
+        if result != 'refreshed':
+            # Drop the rejected token so the next request doesn't send it again.
+            token_store.pop(shop, None)
+            return 'Reauthorization required', 401
+
+        response = call_admin_api(token_store[shop]['access_token'])
+
+        # Retry once, not in a loop. A freshly refreshed token that's also rejected
+        # means something is wrong beyond a lapsed credential, so stop and send the
+        # merchant back through OAuth.
+        if response.status_code == 401:
+            token_store.pop(shop, None)
+            return 'Reauthorization required', 401
+
+    # Forward Shopify's status. Answering a rate limit or an outage with a 200 and
+    # an error body in it would tell the client the request succeeded.
+    return jsonify(response.json()), response.status_code
 # [END oauth.make-request]
 
 

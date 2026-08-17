@@ -234,16 +234,49 @@ app.get('/products', async (req, res) => {
     stored = tokenStore[shop];
   }
 
-  const response = await shopifyFetch(`https://${shop}/admin/api/2026-04/graphql.json`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Shopify-Access-Token': stored.access_token,
-    },
-    body: JSON.stringify({ query: '{ products(first: 5) { edges { node { id handle } } } }' }),
-  });
+  const callAdminApi = (accessToken) =>
+    shopifyFetch(`https://${shop}/admin/api/2026-04/graphql.json`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Shopify-Access-Token': accessToken,
+      },
+      body: JSON.stringify({ query: '{ products(first: 5) { edges { node { id handle } } } }' }),
+    });
 
-  res.json(await response.json());
+  let response = await callAdminApi(stored.access_token);
+
+  // Shopify rejected the access token: it was revoked, the app's access scopes
+  // changed, or it lapsed sooner than expires_in implied. This app runs outside
+  // the Shopify admin, so it has no ID token to exchange — the refresh token is
+  // the only way back. Try it once, then give up rather than sending the same
+  // rejected token again on every later request.
+  if (response.status === 401) {
+    const result = await refreshAccessToken(shop);
+    if (result === 'retry') {
+      // Transient: the refresh token is untouched, so a later attempt is fine.
+      return res.status(503).send('Token refresh failed, try again');
+    }
+    if (result !== 'refreshed') {
+      // Drop the rejected token so the next request doesn't send it again.
+      delete tokenStore[shop];
+      return res.status(401).send('Reauthorization required');
+    }
+
+    response = await callAdminApi(tokenStore[shop].access_token);
+
+    // Retry once, not in a loop. A freshly refreshed token that's also rejected
+    // means something is wrong beyond a lapsed credential, so stop and send the
+    // merchant back through OAuth.
+    if (response.status === 401) {
+      delete tokenStore[shop];
+      return res.status(401).send('Reauthorization required');
+    }
+  }
+
+  // Forward Shopify's status. Answering a rate limit or an outage with a 200 and
+  // an error body in it would tell the client the request succeeded.
+  res.status(response.status).json(await response.json());
 });
 // [END oauth.make-request]
 
