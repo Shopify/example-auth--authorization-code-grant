@@ -27,6 +27,17 @@ Tutorial for authenticating standalone apps using the OAuth authorization code g
 
 Both servers listen on port 3000, so run one at a time.
 
+## Tests
+
+Both server examples ship a recovery test suite that runs against a fake Shopify, so it needs no credentials and makes no network calls:
+
+```sh
+cd node && npm test
+cd python && python test_recovery.py
+```
+
+The suites cover the same scenarios in the same order. Each one runs a real install, then injects a failure — a revoked access token, a dead refresh token, a rate limit — and asserts what the app ends up doing about it, instead of checking a single response in isolation. The two languages are meant to stay in step, so a defect in one shows up as a diff between the suites.
+
 ## Environment variables
 
 | Variable | Description |
