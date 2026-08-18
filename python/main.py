@@ -170,6 +170,9 @@ def callback():
 #                   uninstalled); send the merchant back through OAuth
 #   'retry'       — a transient failure (network, timeout, 5xx, 429); safe to
 #                   retry later with the same refresh token
+#   'failed'      — any other non-OK status, such as a malformed request or bad
+#                   client credentials; retrying sends the identical request and
+#                   fails the same way, so surface it instead of hiding it
 def refresh_access_token(shop):
     stored = token_store.get(shop)
     if not stored or not stored.get('refresh_token'):
@@ -199,8 +202,14 @@ def refresh_access_token(shop):
     if response.status_code == 401:
         token_store.pop(shop, None)
         return 'reauthorize'
-    if not response.ok:
+    # Only a rate limit or a server fault is worth retrying. Treating every other
+    # non-OK status as transient would retry an unrecoverable refresh forever —
+    # a 400 for a malformed body, or a 403 for bad client credentials, returns the
+    # same response no matter how long you wait.
+    if response.status_code == 429 or response.status_code >= 500:
         return 'retry'
+    if not response.ok:
+        return 'failed'
 
     data = response.json()
     token_store[shop] = {
@@ -231,6 +240,11 @@ def products():
             return 'Reauthorization required', 401
         if result == 'retry':
             return 'Token refresh failed, try again', 503
+        if result == 'failed':
+            # Not the merchant's problem and not worth retrying: fix the app's
+            # request or credentials. Don't fall through — `stored` still holds
+            # the token that is about to expire.
+            return 'Token refresh failed', 502
         stored = token_store[shop]
 
     def call_admin_api(access_token):
@@ -256,6 +270,8 @@ def products():
         if result == 'retry':
             # Transient: the refresh token is untouched, so a later attempt is fine.
             return 'Token refresh failed, try again', 503
+        if result == 'failed':
+            return 'Token refresh failed', 502
         if result != 'refreshed':
             # Drop the rejected token so the next request doesn't send it again.
             token_store.pop(shop, None)

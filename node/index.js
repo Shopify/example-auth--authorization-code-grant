@@ -170,6 +170,9 @@ app.get('/callback', async (req, res) => {
 //                   uninstalled); send the merchant back through OAuth
 //   'retry'       — a transient failure (network, timeout, 5xx, 429); safe to
 //                   retry later with the same refresh token
+//   'failed'      — any other non-OK status, such as a malformed request or bad
+//                   client credentials; retrying sends the identical request and
+//                   fails the same way, so surface it instead of hiding it
 async function refreshAccessToken(shop) {
   const stored = tokenStore[shop];
   if (!stored?.refresh_token) return 'reauthorize';
@@ -201,7 +204,12 @@ async function refreshAccessToken(shop) {
     delete tokenStore[shop];
     return 'reauthorize';
   }
-  if (!response.ok) return 'retry';
+  // Only a rate limit or a server fault is worth retrying. Treating every other
+  // non-OK status as transient would retry an unrecoverable refresh forever —
+  // a 400 for a malformed body, or a 403 for bad client credentials, returns the
+  // same response no matter how long you wait.
+  if (response.status === 429 || response.status >= 500) return 'retry';
+  if (!response.ok) return 'failed';
 
   const { access_token, refresh_token, expires_in } = await response.json();
   tokenStore[shop] = {
@@ -231,6 +239,12 @@ app.get('/products', async (req, res) => {
     if (result === 'retry') {
       return res.status(503).send('Token refresh failed, try again');
     }
+    if (result === 'failed') {
+      // Not the merchant's problem and not worth retrying: fix the app's request
+      // or credentials. Don't fall through — `stored` still holds the token that
+      // is about to expire.
+      return res.status(502).send('Token refresh failed');
+    }
     stored = tokenStore[shop];
   }
 
@@ -256,6 +270,9 @@ app.get('/products', async (req, res) => {
     if (result === 'retry') {
       // Transient: the refresh token is untouched, so a later attempt is fine.
       return res.status(503).send('Token refresh failed, try again');
+    }
+    if (result === 'failed') {
+      return res.status(502).send('Token refresh failed');
     }
     if (result !== 'refreshed') {
       // Drop the rejected token so the next request doesn't send it again.

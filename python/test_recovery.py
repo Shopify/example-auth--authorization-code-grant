@@ -356,6 +356,40 @@ def error_status_is_forwarded(client):
     )
 
 
+@scenario('a non-transient refresh failure during recovery is surfaced, not retried')
+def non_transient_refresh_failure_during_recovery(client):
+    install(client, fresh_shop())
+    shopify.live_access_tokens.discard(shopify.minted[0])
+
+    # A malformed request or bad client credentials. Unlike a 5xx, waiting
+    # changes nothing: the identical request returns the identical response.
+    shopify.refresh_status = 400
+
+    result = get_products(client)
+
+    assert result.status == 502, (
+        'a 400 from the token endpoint is not a "try again later" condition'
+    )
+    assert len(shopify.calls_of_type('refresh')) == 1, (
+        'do not retry an unrecoverable refresh'
+    )
+
+
+@scenario('a non-transient refresh failure at expiry does not send the lapsing token')
+def non_transient_refresh_failure_at_expiry(client):
+    shopify.expires_in = 30
+    install(client, fresh_shop())
+
+    shopify.refresh_status = 400
+
+    result = get_products(client)
+
+    assert result.status == 502, result.status
+    assert len(shopify.calls_of_type('graphql')) == 0, (
+        'the refresh failed, so the about-to-expire token must not go out'
+    )
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------

@@ -375,6 +375,53 @@ scenario('an error status from Shopify is forwarded, not reported as success', a
   );
 });
 
+scenario(
+  'a non-transient refresh failure during recovery is surfaced, not retried',
+  async () => {
+    const jar = newJar();
+    await install(freshShop(), jar);
+    const [accessToken] = shopify.minted;
+    shopify.liveAccessTokens.delete(accessToken);
+
+    // A malformed request or bad client credentials. Unlike a 5xx, waiting
+    // changes nothing: the identical request returns the identical response.
+    shopify.refreshStatus = 400;
+
+    const result = await getProducts(jar);
+
+    assert.equal(
+      result.status,
+      502,
+      'a 400 from the token endpoint is not a "try again later" condition',
+    );
+    assert.equal(
+      callsOfType('refresh').length,
+      1,
+      'do not retry an unrecoverable refresh',
+    );
+  },
+);
+
+scenario(
+  'a non-transient refresh failure at expiry does not send the lapsing token',
+  async () => {
+    const jar = newJar();
+    shopify.expiresIn = 30;
+    await install(freshShop(), jar);
+
+    shopify.refreshStatus = 400;
+
+    const result = await getProducts(jar);
+
+    assert.equal(result.status, 502);
+    assert.equal(
+      callsOfType('graphql').length,
+      0,
+      'the refresh failed, so the about-to-expire token must not go out',
+    );
+  },
+);
+
 // ---------------------------------------------------------------------------
 // Runner
 // ---------------------------------------------------------------------------
