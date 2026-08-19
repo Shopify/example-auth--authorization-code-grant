@@ -148,6 +148,7 @@ app.get('/callback', async (req, res) => {
   if (missing.length > 0) return res.status(403).send(`Missing scopes: ${missing.join(', ')}`);
   // [END oauth.confirm-scopes]
 
+  // [START oauth.store-tokens]
   // Store tokens server-side, keyed by shop (use a database in production).
   // Track when the access token expires so requests can refresh it in time.
   tokenStore[shop] = {
@@ -158,9 +159,11 @@ app.get('/callback', async (req, res) => {
 
   // Set a signed session cookie so subsequent requests can identify the shop
   res.cookie('shop', shop, cookieOptions);
+  // [END oauth.store-tokens]
   res.json({ message: 'App installed', shop, scope });
 });
 
+// [START oauth.refresh-token]
 // Exchange the stored refresh token for a new access token. The return value
 // tells the caller how to react, and matches the refresh error handling used
 // across grant types:
@@ -200,6 +203,8 @@ async function refreshAccessToken(shop) {
     return 'retry';
   }
 
+  // [START oauth.handle-refresh-failure]
+  // A 401 is terminal: drop the dead token so the merchant reinstalls.
   if (response.status === 401) {
     delete tokenStore[shop];
     return 'reauthorize';
@@ -210,6 +215,7 @@ async function refreshAccessToken(shop) {
   // same response no matter how long you wait.
   if (response.status === 429 || response.status >= 500) return 'retry';
   if (!response.ok) return 'failed';
+  // [END oauth.handle-refresh-failure]
 
   const { access_token, refresh_token, expires_in } = await response.json();
   tokenStore[shop] = {
@@ -219,6 +225,7 @@ async function refreshAccessToken(shop) {
   };
   return 'refreshed';
 }
+// [END oauth.refresh-token]
 
 // [START oauth.make-request]
 app.get('/products', async (req, res) => {

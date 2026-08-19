@@ -147,6 +147,7 @@ def callback():
         return f'Missing scopes: {", ".join(missing)}', 403
     # [END oauth.confirm-scopes]
 
+    # [START oauth.store-tokens]
     # Store tokens server-side, keyed by shop (use a database in production).
     # Track when the access token expires so requests can refresh it in time.
     token_store[shop] = {
@@ -157,10 +158,12 @@ def callback():
 
     # Store the shop in the signed session cookie
     session['shop'] = shop
+    # [END oauth.store-tokens]
 
     return jsonify({'message': 'App installed', 'shop': shop, 'scope': scope})
 
 
+# [START oauth.refresh-token]
 # Exchange the stored refresh token for a new access token. The return value
 # tells the caller how to react, and matches the refresh error handling used
 # across grant types:
@@ -198,6 +201,7 @@ def refresh_access_token(shop):
         # later with the same one is safe.
         return 'retry'
 
+    # [START oauth.handle-refresh-failure]
     # A 401 is terminal: drop the dead token so the merchant reinstalls.
     if response.status_code == 401:
         token_store.pop(shop, None)
@@ -210,6 +214,7 @@ def refresh_access_token(shop):
         return 'retry'
     if not response.ok:
         return 'failed'
+    # [END oauth.handle-refresh-failure]
 
     data = response.json()
     token_store[shop] = {
@@ -218,6 +223,7 @@ def refresh_access_token(shop):
         'expires_at': expires_at_from(data.get('expires_in')),
     }
     return 'refreshed'
+# [END oauth.refresh-token]
 
 
 # [START oauth.make-request]
